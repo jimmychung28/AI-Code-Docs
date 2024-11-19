@@ -4,7 +4,6 @@ from enum import Enum
 import re
 from langgraph.graph import Graph
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from datetime import datetime
 
@@ -45,7 +44,7 @@ class APIDocumentation:
     authentication: Dict[str, str]
     endpoints: List[APIEndpoint]
     error_codes: Dict[str, str]
-    rate_limits: Optional[Dict[str, str]]
+    rate_limits: str
 
 @dataclass
 class DocumentationOutput:
@@ -148,7 +147,8 @@ curl -X GET "{self.api_docs.base_url}/endpoint" \\
         if not self.api_docs.rate_limits:
             return "No rate limits specified."
             
-        return "\n".join([f"- {k}: {v}" for k, v in self.api_docs.rate_limits.items()])
+        # return "\n".join([f"- {k}: {v}" for k, v in self.api_docs.rate_limits])
+        return self.api_docs.rate_limits
 
     def _generate_library_markdown(self) -> str:
         """Generate markdown for non-API code"""
@@ -174,33 +174,6 @@ class AgentState(TypedDict):
     current_section: DocSection
     error: Optional[str]
 
-# Enhanced prompts for API detection and documentation
-code_analyzer_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a senior API documentation expert. Analyze the given code to:
-1. Determine if it's an API implementation (look for route handlers, HTTP methods, request/response handling)
-2. Identify API endpoints, methods, and structures
-3. Evaluate authentication mechanisms
-4. Identify error handling patterns
-5. Note any rate limiting or security measures
-6. Identify request/response formats
-
-Return your analysis in a structured format starting with "IS_API: true" or "IS_API: false"."""),
-    MessagesPlaceholder(variable_name="messages"),
-    ("human", "Analyze this code:\n{code}")
-])
-
-api_reference_prompt = ChatPromptTemplate.from_messages([
-    ("system", """Generate comprehensive API documentation including:
-1. Each endpoint's path, method, and purpose
-2. Request parameters and body schemas
-3. Response formats and status codes
-4. Authentication requirements
-5. Example requests and responses in curl format
-6. Error scenarios and handling
-7. Rate limits if applicable"""),
-    MessagesPlaceholder(variable_name="messages"),
-    ("human", "Generate API reference for this code based on the analysis:\n{code}\n\nAnalysis:\n{analysis}")
-])
 
 class DocumentationGenerator:
     def __init__(self, model_name: str = "gpt-4", temperature: float = 0.7):
@@ -225,10 +198,19 @@ class DocumentationGenerator:
     def _analyze_code(self, state: AgentState) -> AgentState:
         """Analyzes the code and determines if it's an API, identifying key components."""
         try:
-            messages = code_analyzer_prompt.format_messages(
-                messages=state["messages"],
-                code=state["code"]
-            )
+            messages = [
+                SystemMessage(content="""You are a senior API documentation expert. Analyze the given code to:
+1. Determine if it's an API implementation (look for route handlers, HTTP methods, request/response handling)
+2. Identify API endpoints, methods, and structures
+3. Evaluate authentication mechanisms
+4. Identify error handling patterns
+5. Note any rate limiting or security measures
+6. Identify request/response formats
+
+Return your analysis in a structured format starting with "IS_API: true" or "IS_API: false"."""),
+                HumanMessage(content=f"Analyze this code:\n{state['code']}")
+            ]
+            
             response = self.llm.invoke(messages)
             analysis = response.content
             
@@ -263,26 +245,24 @@ class DocumentationGenerator:
 
     def _generate_api_reference(self, state: AgentState) -> AgentState:
         """Generates comprehensive API reference documentation."""
-        print("generate_api_reference",flush=True)
-        print(state["documentation"].is_api,flush=True)
         if not state["documentation"].is_api:
             state["current_section"] = DocSection.EXAMPLES.value
             return state
-        print("generate_api_reference2",flush=True)
-        print(state["documentation"].is_api,flush=True)
-        try:
-            messages = api_reference_prompt.format_messages(
-                messages=state["messages"],
-                code=state["code"],
-                analysis=state["documentation"].analysis
-            )
-            response = self.llm.invoke(messages)
-            print("generate_api_reference3",flush=True)
-            print(response,flush=True)
-            print(type(response),flush=True)
-            print("response.content",flush=True)
-            print(response.content,flush=True)
             
+        try:
+            messages = [
+                SystemMessage(content="""Generate comprehensive API documentation including:
+1. Each endpoint's path, method, and purpose
+2. Request parameters and body schemas
+3. Response formats and status codes
+4. Authentication requirements
+5. Example requests and responses in curl format
+6. Error scenarios and handling
+7. Rate limits if applicable"""),
+                HumanMessage(content=f"Generate API reference for this code based on the analysis:\n{state['code']}\n\nAnalysis:\n{state['documentation'].analysis}")
+            ]
+            
+            response = self.llm.invoke(messages)
             
             # Replace the ChatPromptTemplate with direct message creation
             messages = [
@@ -373,22 +353,16 @@ class DocumentationGenerator:
             return state
             
         try:
-            auth_prompt = ChatPromptTemplate.from_messages([
-                ("system", """Generate authentication documentation including:
+            messages = [
+                SystemMessage(content="""Generate authentication documentation including:
                 1. Authentication methods supported
                 2. How to obtain API keys/tokens
                 3. How to include authentication in requests
                 4. Security best practices
                 5. Example requests with authentication"""),
-                MessagesPlaceholder(variable_name="messages"),
-                ("human", "Document authentication for this API:\n{code}\n\nAnalysis:\n{analysis}")
-            ])
+                HumanMessage(content=f"Document authentication for this API:\n{state['code']}\n\nAnalysis:\n{state['documentation'].analysis}")
+            ]
             
-            messages = auth_prompt.format_messages(
-                messages=state["messages"],
-                code=state["code"],
-                analysis=state["documentation"].analysis
-            )
             response = self.llm.invoke(messages)
             
             # Update authentication documentation
@@ -397,7 +371,7 @@ class DocumentationGenerator:
                 "examples": self._extract_auth_examples(response.content)
             }
             
-            state["messages"].extend([messages[-1], response])
+            state["messages"].extend([response])
             state["current_section"] = DocSection.AUTHENTICATION.value
         except Exception as e:
             state["error"] = f"Error in authentication documentation: {str(e)}"
@@ -407,36 +381,29 @@ class DocumentationGenerator:
         """Creates comprehensive usage examples."""
         try:
             if state["documentation"].is_api:
-                example_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """Create API usage examples that:
-                    1. Show complete request/response cycles
-                    2. Include authentication
-                    3. Handle errors and edge cases
-                    4. Use realistic data
-                    5. Cover all main endpoints
-                    6. Include different programming languages"""),
-                    MessagesPlaceholder(variable_name="messages"),
-                    ("human", "Create examples for this API:\n{code}")
-                ])
+                example_messages = [
+                    SystemMessage(content="""Create API usage examples that:
+1. Show complete request/response cycles
+2. Include authentication
+3. Handle errors and edge cases
+4. Use realistic data
+5. Cover all main endpoints
+6. Include different programming languages"""),
+                    HumanMessage(content=f"Create examples for this API:\n{state['code']}")
+                ]
             else:
-                example_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """Create code examples that:
-                    1. Start with basic usage
-                    2. Progress to advanced scenarios
-                    3. Include error handling
-                    4. Show best practices
-                    5. Use realistic scenarios"""),
-                    MessagesPlaceholder(variable_name="messages"),
-                    ("human", "Create examples for this code:\n{code}")
-                ])
+                example_messages = [
+                    SystemMessage(content="""Create code examples that:
+1. Start with basic usage
+2. Progress to advanced scenarios
+3. Include error handling
+4. Show best practices
+5. Use realistic scenarios"""),
+                    HumanMessage(content=f"Create examples for this code:\n{state['code']}")
+                ]
+            response = self.llm.invoke(example_messages)
             
-            messages = example_prompt.format_messages(
-                messages=state["messages"],
-                code=state["code"]
-            )
-            response = self.llm.invoke(messages)
-            
-            state["messages"].extend([messages[-1], response])
+            state["messages"].extend([response])
             state["documentation"].examples = response.content
             state["current_section"] = DocSection.EXAMPLES.value
         except Exception as e:
@@ -450,34 +417,29 @@ class DocumentationGenerator:
             return state
             
         try:
-            error_prompt = ChatPromptTemplate.from_messages([
-                ("system", """Document API errors including:
+            # Replace ChatPromptTemplate with direct message creation
+            error_messages = [
+                SystemMessage(content="""Document API errors including:
                 1. All possible error codes
                 2. Error messages and meanings
                 3. How to handle each error
                 4. Example error responses
                 5. Best practices for error handling"""),
-                MessagesPlaceholder(variable_name="messages"),
-                ("human", "Document error handling for this API:\n{code}")
-            ])
+                HumanMessage(content=f"Document error handling for this API:\n{state['code']}")
+            ]
+            response = self.llm.invoke(error_messages)
             
-            messages = error_prompt.format_messages(
-                messages=state["messages"],
-                code=state["code"]
-            )
-            response = self.llm.invoke(messages)
-            
-            # Parse error codes and descriptions
-            error_parse_prompt = ChatPromptTemplate.from_messages([
-                ("system", "Extract error codes and their descriptions as a dictionary"),
-                ("human", response.content)
-            ])
-            error_codes_response = self.llm.invoke(error_parse_prompt)
+            # Replace ChatPromptTemplate with direct message creation
+            error_parse_messages = [
+                SystemMessage(content="Extract error codes and their descriptions as a dictionary"),
+                HumanMessage(content=response.content)
+            ]
+            error_codes_response = self.llm.invoke(error_parse_messages)
             
             # Update error documentation
             state["documentation"].api_docs.error_codes = eval(error_codes_response.content)
             
-            state["messages"].extend([messages[-1], response])
+            state["messages"].extend([response])
             state["current_section"] = DocSection.ERRORS.value
         except Exception as e:
             state["error"] = f"Error in error documentation: {str(e)}"
@@ -487,36 +449,29 @@ class DocumentationGenerator:
         """Generates comprehensive test cases."""
         try:
             if state["documentation"].is_api:
-                test_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """Generate API test cases that:
-                    1. Test all endpoints
-                    2. Include authentication tests
-                    3. Cover error scenarios
-                    4. Test rate limiting
-                    5. Include integration tests
-                    6. Use pytest fixtures and markers"""),
-                    MessagesPlaceholder(variable_name="messages"),
-                    ("human", "Generate test cases for this API:\n{code}")
-                ])
+                test_messages = [
+                    SystemMessage(content="""Generate API test cases that:
+1. Test all endpoints
+2. Include authentication tests
+3. Cover error scenarios
+4. Test rate limiting
+5. Include integration tests
+6. Use pytest fixtures and markers"""),
+                    HumanMessage(content=f"Generate test cases for this API:\n{state['code']}")
+                ]
             else:
-                test_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """Generate test cases that:
-                    1. Include unit tests
-                    2. Cover edge cases
-                    3. Test error handling
-                    4. Use appropriate test fixtures
-                    5. Include integration tests if applicable"""),
-                    MessagesPlaceholder(variable_name="messages"),
-                    ("human", "Generate test cases for this code:\n{code}")
-                ])
+                test_messages = [
+                    SystemMessage(content="""Generate test cases that:
+1. Include unit tests
+2. Cover edge cases
+3. Test error handling
+4. Use appropriate test fixtures
+5. Include integration tests if applicable"""),
+                    HumanMessage(content=f"Generate test cases for this code:\n{state['code']}")
+                ]
+            response = self.llm.invoke(test_messages)
             
-            messages = test_prompt.format_messages(
-                messages=state["messages"],
-                code=state["code"]
-            )
-            response = self.llm.invoke(messages)
-            
-            state["messages"].extend([messages[-1], response])
+            state["messages"].extend([response])
             state["documentation"].test_cases = response.content
             state["current_section"] = DocSection.TESTING.value
         except Exception as e:
@@ -560,17 +515,7 @@ class DocumentationGenerator:
         ]
         
         if any(not field for field in required_fields):
-            missing_fields = []
-            field_names = [
-                "title", "base URL", "version", "description", 
-                "authentication", "endpoints", "error codes"
-            ]
             
-            for field, name in zip(required_fields, field_names):
-                if not field:
-                    missing_fields.append(name)
-                    
-            print(f"Missing required fields: {', '.join(missing_fields)}", flush=True)
             raise ValueError("API documentation is incomplete. Missing required fields.")
     def _should_continue(self, state: AgentState) -> str:
         """
