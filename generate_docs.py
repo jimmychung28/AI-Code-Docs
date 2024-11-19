@@ -85,8 +85,13 @@ def should_continue(state: AgentState) -> str:
         return "docstrings"
     elif state["current_section"] == "docstrings":
         return "examples"
-    else:
+    elif state["current_section"] == "examples":
         return "end"
+    return "end"
+
+def end_documentation(state: AgentState) -> Dict:
+    """Final node that returns the state unchanged."""
+    return state
 
 # Create the workflow graph
 workflow = Graph()
@@ -95,11 +100,44 @@ workflow = Graph()
 workflow.add_node("analyze", analyze_code)
 workflow.add_node("docstrings", generate_docstrings)
 workflow.add_node("examples", create_usage_examples)
+workflow.add_node("end", end_documentation)
 
-# Add edges to connect the nodes
-workflow.add_edge("analyze", "docstrings")
-workflow.add_edge("docstrings", "examples")
-workflow.add_edge("examples", "end")
+# Set the entry point
+workflow.set_entry_point("analyze")
+
+# Add edges with proper end state handling
+workflow.add_conditional_edges(
+    "analyze",
+    should_continue,
+    {
+        "analyze": "analyze",
+        "docstrings": "docstrings",
+        "examples": "examples",
+        "end": "end"
+    }
+)
+
+workflow.add_conditional_edges(
+    "docstrings",
+    should_continue,
+    {
+        "docstrings": "docstrings",
+        "examples": "examples",
+        "end": "end"
+    }
+)
+
+workflow.add_conditional_edges(
+    "examples",
+    should_continue,
+    {
+        "examples": "examples",
+        "end": "end"
+    }
+)
+
+# Set the end node
+workflow.set_finish_point("end")
 
 # Compile the graph
 app = workflow.compile()
