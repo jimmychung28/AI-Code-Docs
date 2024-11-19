@@ -306,7 +306,7 @@ class DocumentationGenerator:
             state["documentation"].api_docs.title = api_info_dict.get("title", "")
             state["documentation"].api_docs.base_url = api_info_dict.get("base_url", "")
             state["documentation"].api_docs.version = api_info_dict.get("version", "")
-            state["documentation"].api_docs.description = api_info_dict.get("description", "")
+            state["documentation"].api_docs.description = api_info_dict.get("descrgitiption", "")
             
             # Parse and update endpoints
             endpoints_prompt = ChatPromptTemplate.from_messages([
@@ -327,7 +327,13 @@ class DocumentationGenerator:
             print("endpoints_response",flush=True)
             print(endpoints_response.content,flush=True)
             # Update endpoints in the documentation
-            endpoints_list = eval(endpoints_response.content)
+            try:
+                endpoints_list = eval(endpoints_response.content)
+            except Exception as e:
+                print("endpoints_list_2",flush=True)
+                print(e)
+            print("endpoints_list",flush=True)
+            print(e,flush=True)
             state["documentation"].api_docs.endpoints = [
                 APIEndpoint(**endpoint) for endpoint in endpoints_list
             ]
