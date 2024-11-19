@@ -1,276 +1,755 @@
-from typing import Dict, TypedDict, Optional, Set, List, Union, Annotated
-from dataclasses import dataclass, field
+from typing import Dict, TypedDict, List, Optional, Union
+from dataclasses import dataclass, asdict
 from enum import Enum
-from langgraph.graph import Graph, StateGraph
-from langgraph.prebuilt import ToolExecutor
-from langgraph.graph.tools import Tool
-import operator
-from datetime import datetime
+import re
+from langgraph.graph import Graph
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
-import json
-from typing import TypeVar, Generic
-from functools import partial
+from datetime import datetime
 
-# Define types
-class DocumentationType(str, Enum):
+class CodeType(Enum):
+    API = "api"
+    LIBRARY = "library"
+    SCRIPT = "script"
+
+class DocSection(Enum):
+    EMPTY = ""
     ANALYSIS = "analysis"
-    DOCSTRINGS = "docstrings"
+    API_REFERENCE = "api_reference"
+    AUTHENTICATION = "authentication"
     EXAMPLES = "examples"
-    TESTS = "tests"
-    API_SPEC = "api_spec"
-    ARCHITECTURE = "architecture"
-    DEPLOYMENT = "deployment"
-    SECURITY = "security"
-    PERFORMANCE = "performance"
+    ERRORS = "errors"
+    TESTING = "testing"
+    COMPLETED = "completed"
 
-class AnalysisLevel(str, Enum):
-    BASIC = "basic"
-    DETAILED = "detailed"
-    COMPREHENSIVE = "comprehensive"
+@dataclass
+class APIEndpoint:
+    """Structure for API endpoint documentation"""
+    path: str
+    method: str
+    description: str
+    parameters: Dict[str, Dict[str, str]]
+    request_body: Optional[Dict[str, any]]
+    response: Dict[str, any]
+    example_request: str
+    example_response: str
 
-# State definitions
-class DocumentationTask(BaseModel):
-    """Represents a single documentation task in the workflow"""
-    doc_type: DocumentationType
-    dependencies: Set[DocumentationType] = Field(default_factory=set)
-    status: str = "pending"
-    content: Optional[str] = None
-    metadata: Dict = Field(default_factory=dict)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+@dataclass
+class APIDocumentation:
+    """Structure for complete API documentation"""
+    title: str
+    base_url: str
+    version: str
+    description: str
+    authentication: Dict[str, str]
+    endpoints: List[APIEndpoint]
+    error_codes: Dict[str, str]
+    rate_limits: Optional[Dict[str, str]]
 
-class WorkflowState(BaseModel):
-    """Complete state of the documentation workflow"""
-    tasks: Dict[DocumentationType, DocumentationTask] = Field(default_factory=dict)
-    code: str
-    messages: List = Field(default_factory=list)
-    analysis_level: AnalysisLevel = AnalysisLevel.DETAILED
-    current_tasks: Set[DocumentationType] = Field(default_factory=set)
-    completed_tasks: Set[DocumentationType] = Field(default_factory=set)
-    failed_tasks: Set[DocumentationType] = Field(default_factory=set)
-    results: Dict[str, str] = Field(default_factory=dict)
-
-class DocumentationTools:
-    """Tools for documentation generation"""
+@dataclass
+class DocumentationOutput:
+    """Structure for organized documentation output"""
+    api_docs: Optional[APIDocumentation]
+    analysis: str
+    examples: str
+    test_cases: str
+    timestamp: str
+    is_api: bool
     
-    def __init__(self, llm: ChatOpenAI):
-        self.llm = llm
-        self.prompts = self._initialize_prompts()
+    def to_markdown(self) -> str:
+        """Convert documentation to formatted markdown with Stripe-like styling"""
+        print("is_api",flush=True)
+        print(self.is_api,flush=True)
+        if not self.is_api:
+            return self._generate_library_markdown()
+        print(self.api_docs,flush=True)
+        return f"""# {self.api_docs.title} API Reference
+
+{self.api_docs.description}
+
+## Base URL
+`{self.api_docs.base_url}`
+
+## Authentication
+{self._format_authentication()}
+
+## API Endpoints
+
+{self._format_endpoints()}
+
+## Error Codes
+
+{self._format_errors()}
+
+## Rate Limits
+{self._format_rate_limits()}
+
+---
+Generated on: {self.timestamp}
+"""
+
+    def _format_authentication(self) -> str:
+        auth = self.api_docs.authentication
+        return f"""```bash
+# Authentication using API key
+curl -X GET "{self.api_docs.base_url}/endpoint" \\
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+{auth.get('description', '')}
+"""
+
+    def _format_endpoints(self) -> str:
+        formatted = []
+        for endpoint in self.api_docs.endpoints:
+            formatted.append(f"""### {endpoint.method.upper()} {endpoint.path}
+
+{endpoint.description}
+
+**Parameters**
+{self._format_parameters(endpoint.parameters)}
+
+**Example Request**
+```bash
+{endpoint.example_request}
+```
+
+**Example Response**
+```json
+{endpoint.example_response}
+```
+""")
+        return "\n".join(formatted)
+
+    def _format_parameters(self, params: Dict[str, Dict[str, str]]) -> str:
+        if not params:
+            return "No parameters required."
+            
+        rows = ["| Parameter | Type | Required | Description |",
+                "|-----------|------|----------|-------------|"]
         
-    def _initialize_prompts(self) -> Dict[DocumentationType, ChatPromptTemplate]:
-        return {
-            DocumentationType.ANALYSIS: ChatPromptTemplate.from_messages([
-                ("system", """Analyze the code structure, patterns, and complexity.
-                Detail Level: {analysis_level}
-                
-                Provide your analysis with:
-                - Main components and their relationships
-                - Code patterns and architectural decisions
-                - Complexity assessment
-                - Key dependencies
-                
-                Format as markdown with clear sections."""),
-                ("human", "{code}")
-            ]),
-            
-            DocumentationType.API_SPEC: ChatPromptTemplate.from_messages([
-                ("system", """Generate OpenAPI 3.0 specification for the code.
-                Include:
-                - All endpoints and their methods
-                - Request/response schemas
-                - Authentication requirements
-                - Error responses
-                
-                Base your analysis on the provided code analysis.
-                Format as valid OpenAPI JSON."""),
-                ("human", "Code: {code}\nAnalysis: {analysis}")
-            ]),
-            
-            # Add other specialized prompts...
-        }
-    
-    def create_tools(self) -> List[Tool]:
-        """Create tools for the workflow"""
-        return [
-            Tool(
-                name=doc_type.value,
-                description=f"Generate {doc_type.value} documentation",
-                function=partial(self.generate_documentation, doc_type=doc_type)
+        for name, details in params.items():
+            rows.append(
+                f"| `{name}` | {details.get('type', '')} | "
+                f"{details.get('required', 'False')} | {details.get('description', '')} |"
             )
-            for doc_type in DocumentationType
-        ]
+        return "\n".join(rows)
 
-    async def generate_documentation(
-        self,
-        state: WorkflowState,
-        doc_type: DocumentationType
-    ) -> str:
-        """Generate documentation for a specific type"""
-        prompt = self.prompts[doc_type]
+    def _format_errors(self) -> str:
+        rows = ["| Code | Description |",
+                "|------|-------------|"]
         
-        # Prepare context
-        context = {
-            "code": state.code,
-            "analysis_level": state.analysis_level.value
+        for code, desc in self.api_docs.error_codes.items():
+            rows.append(f"| `{code}` | {desc} |")
+        return "\n".join(rows)
+
+    def _format_rate_limits(self) -> str:
+        if not self.api_docs.rate_limits:
+            return "No rate limits specified."
+            
+        return "\n".join([f"- {k}: {v}" for k, v in self.api_docs.rate_limits.items()])
+
+    def _generate_library_markdown(self) -> str:
+        """Generate markdown for non-API code"""
+        return f"""# Code Documentation
+
+## Code Analysis
+{self.analysis}
+
+## Usage Examples
+{self.examples}
+
+## Test Cases
+{self.test_cases}
+
+---
+Generated on: {self.timestamp}
+"""
+
+class AgentState(TypedDict):
+    messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
+    code: str
+    documentation: DocumentationOutput
+    current_section: DocSection
+    error: Optional[str]
+
+# Enhanced prompts for API detection and documentation
+code_analyzer_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a senior API documentation expert. Analyze the given code to:
+1. Determine if it's an API implementation (look for route handlers, HTTP methods, request/response handling)
+2. Identify API endpoints, methods, and structures
+3. Evaluate authentication mechanisms
+4. Identify error handling patterns
+5. Note any rate limiting or security measures
+6. Identify request/response formats
+
+Return your analysis in a structured format starting with "IS_API: true" or "IS_API: false"."""),
+    MessagesPlaceholder(variable_name="messages"),
+    ("human", "Analyze this code:\n{code}")
+])
+
+api_reference_prompt = ChatPromptTemplate.from_messages([
+    ("system", """Generate comprehensive API documentation including:
+1. Each endpoint's path, method, and purpose
+2. Request parameters and body schemas
+3. Response formats and status codes
+4. Authentication requirements
+5. Example requests and responses in curl format
+6. Error scenarios and handling
+7. Rate limits if applicable"""),
+    MessagesPlaceholder(variable_name="messages"),
+    ("human", "Generate API reference for this code based on the analysis:\n{code}\n\nAnalysis:\n{analysis}")
+])
+
+class DocumentationGenerator:
+    def __init__(self, model_name: str = "gpt-4", temperature: float = 0.7):
+        self.llm = ChatOpenAI(
+            model=model_name,
+            temperature=temperature
+        )
+        self.workflow = self._create_workflow()
+
+    def _detect_api_patterns(self, code: str) -> bool:
+        """Use regex patterns to detect common API patterns in code"""
+        api_patterns = [
+            r'@(app|router)\.(get|post|put|delete|patch)',  # Flask/FastAPI patterns
+            r'app.use\([\'"]/',  # Express.js patterns
+            r'@RequestMapping',  # Spring patterns
+            r'class.*Controller',  # Common controller patterns
+            r'(res|response)\.(json|send)',  # Response patterns
+            r'router\.[A-Za-z]+\([\'"]/',  # Router patterns
+        ]
+        
+        return any(re.search(pattern, code, re.IGNORECASE) for pattern in api_patterns)
+    def _analyze_code(self, state: AgentState) -> AgentState:
+        """Analyzes the code and determines if it's an API, identifying key components."""
+        try:
+            messages = code_analyzer_prompt.format_messages(
+                messages=state["messages"],
+                code=state["code"]
+            )
+            response = self.llm.invoke(messages)
+            analysis = response.content
+            
+            # Parse API detection from analysis
+            is_api = "is_api: true" in analysis.lower()
+            print(analysis.lower())
+            print("is_api2",flush=True)
+            print(is_api,flush=True)
+            if is_api != state["documentation"].is_api:
+                # Update documentation structure if API detection differs
+                print("is_api3",flush=True)
+                print(is_api,flush=True)
+                state["documentation"].is_api = is_api
+                if is_api:
+                    state["documentation"].api_docs = APIDocumentation(
+                        title="",
+                        base_url="",
+                        version="",
+                        description="",
+                        authentication={},
+                        endpoints=[],
+                        error_codes={},
+                        rate_limits={}
+                    )
+            
+            state["messages"].extend([messages[-1], response])
+            state["documentation"].analysis = analysis
+            state["current_section"] = DocSection.ANALYSIS.value
+        except Exception as e:
+            state["error"] = f"Error in code analysis: {str(e)}"
+        return state
+
+    def _generate_api_reference(self, state: AgentState) -> AgentState:
+        """Generates comprehensive API reference documentation."""
+        print("generate_api_reference",flush=True)
+        print(state["documentation"].is_api,flush=True)
+        if not state["documentation"].is_api:
+            state["current_section"] = DocSection.EXAMPLES.value
+            return state
+        print("generate_api_reference2",flush=True)
+        print(state["documentation"].is_api,flush=True)
+        try:
+            messages = api_reference_prompt.format_messages(
+                messages=state["messages"],
+                code=state["code"],
+                analysis=state["documentation"].analysis
+            )
+            response = self.llm.invoke(messages)
+            print("generate_api_reference3",flush=True)
+            print(response,flush=True)
+            print(type(response),flush=True)
+            print("response.content",flush=True)
+            print(response.content,flush=True)
+            
+            
+            # Replace the ChatPromptTemplate with direct message creation
+            messages = [
+                SystemMessage(content="""Extract API title, base URL, version, and description from the documentation.
+                Return the information in the following Python dictionary format EXACTLY:
+                {
+                    "title": "API Title",
+                    "base_url": "https://api.example.com",
+                    "version": "v1",
+                    "description": "API description"
+                }"""),
+                HumanMessage(content=response.content)
+            ]
+            
+            api_info = self.llm.invoke(messages)
+
+            print("api_info",flush=True)
+            print(api_info.content,flush=True)
+            # Update the API documentation with basic info
+            api_info_dict = eval(api_info.content)
+            state["documentation"].api_docs.title = api_info_dict.get("title", "")
+            state["documentation"].api_docs.base_url = api_info_dict.get("base_url", "")
+            state["documentation"].api_docs.version = api_info_dict.get("version", "")
+            state["documentation"].api_docs.description = api_info_dict.get("description", "")
+            
+            # Parse and update endpoints
+            endpoints_prompt = ChatPromptTemplate.from_messages([
+                ("system", """Extract API endpoints information in the following format for each endpoint:
+                {
+                    "path": "/endpoint",
+                    "method": "GET/POST/etc",
+                    "description": "description",
+                    "parameters": {"param": {"type": "string", "required": true, "description": "desc"}},
+                    "request_body": {"type": "object", "properties": {}},
+                    "response": {"type": "object", "properties": {}},
+                    "example_request": "curl example",
+                    "example_response": "json response"
+                }"""),
+                ("human", response.content)
+            ])
+            endpoints_response = self.llm.invoke(endpoints_prompt)
+            print("endpoints_response",flush=True)
+            print(endpoints_response.content,flush=True)
+            # Update endpoints in the documentation
+            endpoints_list = eval(endpoints_response.content)
+            state["documentation"].api_docs.endpoints = [
+                APIEndpoint(**endpoint) for endpoint in endpoints_list
+            ]
+            
+            # Update the messages history
+            state["messages"].extend([messages[-1], response])
+            state["current_section"] = DocSection.API_REFERENCE.value
+        except Exception as e:
+            state["error"] = f"Error in API reference generation: {str(e)}"
+        return state
+
+    def _document_authentication(self, state: AgentState) -> AgentState:
+        """Documents authentication methods and requirements."""
+        if not state["documentation"].is_api:
+            state["current_section"] = DocSection.EXAMPLES.value
+            return state
+            
+        try:
+            auth_prompt = ChatPromptTemplate.from_messages([
+                ("system", """Generate authentication documentation including:
+                1. Authentication methods supported
+                2. How to obtain API keys/tokens
+                3. How to include authentication in requests
+                4. Security best practices
+                5. Example requests with authentication"""),
+                MessagesPlaceholder(variable_name="messages"),
+                ("human", "Document authentication for this API:\n{code}\n\nAnalysis:\n{analysis}")
+            ])
+            
+            messages = auth_prompt.format_messages(
+                messages=state["messages"],
+                code=state["code"],
+                analysis=state["documentation"].analysis
+            )
+            response = self.llm.invoke(messages)
+            
+            # Update authentication documentation
+            state["documentation"].api_docs.authentication = {
+                "description": response.content,
+                "examples": self._extract_auth_examples(response.content)
+            }
+            
+            state["messages"].extend([messages[-1], response])
+            state["current_section"] = DocSection.AUTHENTICATION.value
+        except Exception as e:
+            state["error"] = f"Error in authentication documentation: {str(e)}"
+        return state
+
+    def _create_examples(self, state: AgentState) -> AgentState:
+        """Creates comprehensive usage examples."""
+        try:
+            if state["documentation"].is_api:
+                example_prompt = ChatPromptTemplate.from_messages([
+                    ("system", """Create API usage examples that:
+                    1. Show complete request/response cycles
+                    2. Include authentication
+                    3. Handle errors and edge cases
+                    4. Use realistic data
+                    5. Cover all main endpoints
+                    6. Include different programming languages"""),
+                    MessagesPlaceholder(variable_name="messages"),
+                    ("human", "Create examples for this API:\n{code}")
+                ])
+            else:
+                example_prompt = ChatPromptTemplate.from_messages([
+                    ("system", """Create code examples that:
+                    1. Start with basic usage
+                    2. Progress to advanced scenarios
+                    3. Include error handling
+                    4. Show best practices
+                    5. Use realistic scenarios"""),
+                    MessagesPlaceholder(variable_name="messages"),
+                    ("human", "Create examples for this code:\n{code}")
+                ])
+            
+            messages = example_prompt.format_messages(
+                messages=state["messages"],
+                code=state["code"]
+            )
+            response = self.llm.invoke(messages)
+            
+            state["messages"].extend([messages[-1], response])
+            state["documentation"].examples = response.content
+            state["current_section"] = DocSection.EXAMPLES.value
+        except Exception as e:
+            state["error"] = f"Error in example generation: {str(e)}"
+        return state
+
+    def _document_errors(self, state: AgentState) -> AgentState:
+        """Documents error codes, messages, and handling."""
+        if not state["documentation"].is_api:
+            state["current_section"] = DocSection.TESTING.value
+            return state
+            
+        try:
+            error_prompt = ChatPromptTemplate.from_messages([
+                ("system", """Document API errors including:
+                1. All possible error codes
+                2. Error messages and meanings
+                3. How to handle each error
+                4. Example error responses
+                5. Best practices for error handling"""),
+                MessagesPlaceholder(variable_name="messages"),
+                ("human", "Document error handling for this API:\n{code}")
+            ])
+            
+            messages = error_prompt.format_messages(
+                messages=state["messages"],
+                code=state["code"]
+            )
+            response = self.llm.invoke(messages)
+            
+            # Parse error codes and descriptions
+            error_parse_prompt = ChatPromptTemplate.from_messages([
+                ("system", "Extract error codes and their descriptions as a dictionary"),
+                ("human", response.content)
+            ])
+            error_codes_response = self.llm.invoke(error_parse_prompt)
+            
+            # Update error documentation
+            state["documentation"].api_docs.error_codes = eval(error_codes_response.content)
+            
+            state["messages"].extend([messages[-1], response])
+            state["current_section"] = DocSection.ERRORS.value
+        except Exception as e:
+            state["error"] = f"Error in error documentation: {str(e)}"
+        return state
+
+    def _generate_test_cases(self, state: AgentState) -> AgentState:
+        """Generates comprehensive test cases."""
+        try:
+            if state["documentation"].is_api:
+                test_prompt = ChatPromptTemplate.from_messages([
+                    ("system", """Generate API test cases that:
+                    1. Test all endpoints
+                    2. Include authentication tests
+                    3. Cover error scenarios
+                    4. Test rate limiting
+                    5. Include integration tests
+                    6. Use pytest fixtures and markers"""),
+                    MessagesPlaceholder(variable_name="messages"),
+                    ("human", "Generate test cases for this API:\n{code}")
+                ])
+            else:
+                test_prompt = ChatPromptTemplate.from_messages([
+                    ("system", """Generate test cases that:
+                    1. Include unit tests
+                    2. Cover edge cases
+                    3. Test error handling
+                    4. Use appropriate test fixtures
+                    5. Include integration tests if applicable"""),
+                    MessagesPlaceholder(variable_name="messages"),
+                    ("human", "Generate test cases for this code:\n{code}")
+                ])
+            
+            messages = test_prompt.format_messages(
+                messages=state["messages"],
+                code=state["code"]
+            )
+            response = self.llm.invoke(messages)
+            
+            state["messages"].extend([messages[-1], response])
+            state["documentation"].test_cases = response.content
+            state["current_section"] = DocSection.TESTING.value
+        except Exception as e:
+            state["error"] = f"Error in test case generation: {str(e)}"
+        return state
+
+    def _end_documentation(self, state: AgentState) -> AgentState:
+        """Finalizes the documentation and performs any cleanup."""
+        try:
+            # Add timestamp
+            state["documentation"].timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Validate documentation completeness
+            if state["documentation"].is_api:
+                self._validate_api_documentation(state["documentation"])
+            
+            state["current_section"] = DocSection.COMPLETED.value
+        except Exception as e:
+            state["error"] = f"Error in documentation finalization: {str(e)}"
+        return state
+
+    def _extract_auth_examples(self, content: str) -> Dict[str, str]:
+        """Helper method to extract authentication examples from content."""
+        # Implementation to parse authentication examples
+        return {}
+
+    def _validate_api_documentation(self, documentation: DocumentationOutput) -> None:
+        """Helper method to validate API documentation completeness."""
+        if not documentation.is_api:
+            return
+        print("validate",flush=True)
+        print(documentation.api_docs,flush=True)
+        required_fields = [
+            documentation.api_docs.title,
+            documentation.api_docs.base_url,
+            documentation.api_docs.version,
+            documentation.api_docs.description,
+            documentation.api_docs.authentication,
+            documentation.api_docs.endpoints,
+            documentation.api_docs.error_codes
+        ]
+        
+        if any(not field for field in required_fields):
+            raise ValueError("API documentation is incomplete. Missing required fields.")
+    def _should_continue(self, state: AgentState) -> str:
+        """
+        Determines the next section in the documentation workflow based on current state.
+        
+        This method implements the workflow logic for both API and non-API documentation,
+        ensuring all necessary sections are completed in the correct order.
+        
+        Args:
+            state (AgentState): Current state of the documentation process
+            
+        Returns:
+            str: The next section value from DocSection enum
+            
+        Logic:
+        1. If there's an error, move to completion
+        2. For APIs: analysis -> api_reference -> authentication -> examples -> errors -> testing -> completed
+        3. For non-APIs: analysis -> examples -> testing -> completed
+        4. Skip API-specific sections for non-API code
+        """
+        # Handle errors by moving to completion
+        if state.get("error"):
+            return DocSection.COMPLETED.value
+        
+        # Get current section
+        current = DocSection(state["current_section"])
+        
+        # Define workflow paths
+        api_workflow = {
+            DocSection.EMPTY: DocSection.ANALYSIS,
+            DocSection.ANALYSIS: DocSection.API_REFERENCE,
+            DocSection.API_REFERENCE: DocSection.AUTHENTICATION,
+            DocSection.AUTHENTICATION: DocSection.EXAMPLES,
+            DocSection.EXAMPLES: DocSection.ERRORS,
+            DocSection.ERRORS: DocSection.TESTING,
+            DocSection.TESTING: DocSection.COMPLETED
         }
         
-        # Add analysis result if needed
-        if doc_type != DocumentationType.ANALYSIS:
-            context["analysis"] = state.results.get(DocumentationType.ANALYSIS, "")
-            
-        # Generate documentation
-        messages = prompt.format_messages(**context)
-        response = self.llm.invoke(messages)
+        non_api_workflow = {
+            DocSection.EMPTY: DocSection.ANALYSIS,
+            DocSection.ANALYSIS: DocSection.EXAMPLES,
+            DocSection.EXAMPLES: DocSection.TESTING,
+            DocSection.TESTING: DocSection.COMPLETED
+        }
         
-        return response.content
+        # Check for required sections completion
+        def _is_section_complete(section: DocSection) -> bool:
+            """Helper function to check if a section is complete"""
+            if section == DocSection.API_REFERENCE:
+                return bool(state["documentation"].api_docs.endpoints)
+            elif section == DocSection.AUTHENTICATION:
+                return bool(state["documentation"].api_docs.authentication)
+            elif section == DocSection.EXAMPLES:
+                return bool(state["documentation"].examples)
+            elif section == DocSection.ERRORS:
+                return bool(state["documentation"].api_docs.error_codes)
+            elif section == DocSection.TESTING:
+                return bool(state["documentation"].test_cases)
+            return True
 
-class DocumentationGraph:
-    """Constructs and manages the documentation workflow graph"""
-    
-    def __init__(
-        self,
-        tools: DocumentationTools,
-        doc_types: Set[DocumentationType],
-        analysis_level: AnalysisLevel = AnalysisLevel.DETAILED
-    ):
-        self.tools = tools
-        self.doc_types = doc_types
-        self.analysis_level = analysis_level
-        self.graph = self._build_graph()
+        # Select appropriate workflow
+        workflow = api_workflow if state["documentation"].is_api else non_api_workflow
         
-    def _build_graph(self) -> StateGraph:
-        """Build the workflow graph"""
-        # Create the graph
-        workflow = StateGraph(WorkflowState)
+        # Handle section transitions
+        next_section = workflow.get(current, DocSection.COMPLETED)
         
-        # Add nodes for each documentation type
-        tool_executor = ToolExecutor(self.tools.create_tools())
+        # If current section is not complete, stay on it
+        if not _is_section_complete(current):
+            return current.value
         
-        for doc_type in self.doc_types:
-            workflow.add_node(doc_type.value, tool_executor)
+        # Special handling for API-specific sections in non-API code
+        if not state["documentation"].is_api:
+            if next_section in [DocSection.API_REFERENCE, DocSection.AUTHENTICATION, DocSection.ERRORS]:
+                return DocSection.EXAMPLES.value
+        
+        # Validation before completion
+        if next_section == DocSection.COMPLETED:
+            # For APIs, ensure all required sections are complete
+            if state["documentation"].is_api:
+                required_sections = [
+                    DocSection.API_REFERENCE,
+                    DocSection.AUTHENTICATION,
+                    DocSection.EXAMPLES,
+                    DocSection.ERRORS,
+                    DocSection.TESTING
+                ]
+                
+                # Find first incomplete required section
+                for section in required_sections:
+                    if not _is_section_complete(section):
+                        return section.value
+                        
+            # For non-APIs, ensure examples and testing are complete
+            else:
+                required_sections = [DocSection.EXAMPLES, DocSection.TESTING]
+                for section in required_sections:
+                    if not _is_section_complete(section):
+                        return section.value
+        
+        return next_section.value
+
+    def _create_workflow(self) -> Graph:
+            """Creates the workflow graph for documentation generation"""
+            workflow = Graph()
             
-        # Add conditional edges
-        workflow.add_edge("start", DocumentationType.ANALYSIS.value)
-        
-        # Add conditional transitions
-        for doc_type in self.doc_types:
-            if doc_type != DocumentationType.ANALYSIS:
+            # Add nodes for API documentation
+            workflow.add_node("analyze", self._analyze_code)
+            workflow.add_node("api_reference", self._generate_api_reference)
+            workflow.add_node("authentication", self._document_authentication)
+            workflow.add_node("examples", self._create_examples)
+            workflow.add_node("errors", self._document_errors)
+            workflow.add_node("testing", self._generate_test_cases)
+            workflow.add_node("end", self._end_documentation)
+            
+            # Set entry point
+            workflow.set_entry_point("analyze")
+            
+            # Add edges with conditional routing based on documentation section
+            workflow.add_conditional_edges(
+                "analyze",
+                self._should_continue,
+                {
+                    DocSection.API_REFERENCE.value: "api_reference",
+                    DocSection.AUTHENTICATION.value: "authentication",
+                    DocSection.EXAMPLES.value: "examples",
+                    DocSection.ERRORS.value: "errors",
+                    DocSection.TESTING.value: "testing",
+                    DocSection.COMPLETED.value: "end"
+                }
+            )
+            
+            # Add edges for remaining nodes
+            for node in ["api_reference", "authentication", "examples", "errors", "testing"]:
                 workflow.add_conditional_edges(
-                    doc_type.value,
-                    self._get_next_tasks,
+                    node,
+                    self._should_continue,
                     {
-                        next_type.value: next_type.value 
-                        for next_type in self.doc_types
+                        DocSection.API_REFERENCE.value: "api_reference",
+                        DocSection.AUTHENTICATION.value: "authentication",
+                        DocSection.EXAMPLES.value: "examples",
+                        DocSection.ERRORS.value: "errors",
+                        DocSection.TESTING.value: "testing",
+                        DocSection.COMPLETED.value: "end"
                     }
                 )
+            
+            workflow.set_finish_point("end")
+            return workflow.compile()
+
+    def generate(self, code: str) -> DocumentationOutput:
+        """
+        Generates comprehensive documentation for the given code.
         
-        # Set entry and exit
-        workflow.set_entry_point("start")
-        workflow.set_finish_point("end")
+        Args:
+            code (str): The source code to document
+            
+        Returns:
+            DocumentationOutput: Generated documentation including API reference,
+                               examples, and test cases if it's an API, or regular
+                               documentation if it's a library
+        """
+        is_api = self._detect_api_patterns(code)
         
-        return workflow.compile()
-    
-    def _get_next_tasks(self, state: WorkflowState) -> List[str]:
-        """Determine next tasks based on dependencies"""
-        next_tasks = []
-        
-        for doc_type in self.doc_types:
-            task = state.tasks[doc_type]
-            if (
-                task.status == "pending" 
-                and task.dependencies.issubset(state.completed_tasks)
-            ):
-                next_tasks.append(doc_type.value)
-                
-        return next_tasks or ["end"]
-    
-    async def generate(self, code: str) -> WorkflowState:
-        """Generate complete documentation"""
-        # Initialize state
-        initial_state = WorkflowState(
-            code=code,
-            analysis_level=self.analysis_level,
-            tasks={
-                doc_type: DocumentationTask(
-                    doc_type=doc_type,
-                    dependencies=self._get_dependencies(doc_type)
-                )
-                for doc_type in self.doc_types
-            }
-        )
-        
-        # Execute the graph
-        final_state = await self.graph.arun(initial_state)
-        return final_state
-    
-    def _get_dependencies(self, doc_type: DocumentationType) -> Set[DocumentationType]:
-        """Get dependencies for a documentation type"""
-        dependencies = {
-            DocumentationType.API_SPEC: {DocumentationType.ANALYSIS},
-            DocumentationType.ARCHITECTURE: {DocumentationType.ANALYSIS},
-            DocumentationType.SECURITY: {DocumentationType.ANALYSIS},
-            DocumentationType.PERFORMANCE: {DocumentationType.ANALYSIS},
-            DocumentationType.DOCSTRINGS: {DocumentationType.ANALYSIS},
-            DocumentationType.EXAMPLES: {DocumentationType.DOCSTRINGS},
-            DocumentationType.TESTS: {DocumentationType.EXAMPLES},
+        initial_state = {
+            "messages": [],
+            "code": code,
+            "documentation": DocumentationOutput(
+                api_docs=APIDocumentation(
+                    title="",
+                    base_url="",
+                    version="",
+                    description="",
+                    authentication={},
+                    endpoints=[],
+                    error_codes={},
+                    rate_limits={}
+                ) if is_api else None,
+                analysis="",
+                examples="",
+                test_cases="",
+                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_api=is_api
+            ),
+            "current_section": DocSection.EMPTY.value,
+            "error": None
         }
-        return dependencies.get(doc_type, set())
+        
+        final_state = self.workflow.invoke(initial_state)
+        
+        if final_state.get("error"):
+            raise RuntimeError(f"Documentation generation failed: {final_state['error']}")
+            
+        return final_state["documentation"]
 
 # Example usage
 if __name__ == "__main__":
-    import asyncio
+    sample_api_code = """
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
     
-    async def main():
-        # Initialize tools with LLM
-        llm = ChatOpenAI(model="gpt-4", temperature=0.7)
-        tools = DocumentationTools(llm)
-        
-        # Configure documentation types
-        doc_types = {
-            DocumentationType.ANALYSIS,
-            DocumentationType.API_SPEC,
-            DocumentationType.ARCHITECTURE,
-            DocumentationType.SECURITY,
-            DocumentationType.DOCSTRINGS,
-            DocumentationType.EXAMPLES
-        }
-        
-        # Create documentation graph
-        doc_graph = DocumentationGraph(
-            tools=tools,
-            doc_types=doc_types,
-            analysis_level=AnalysisLevel.DETAILED
-        )
-        
-        # Sample code
-        sample_code = """
-        @app.route('/api/users', methods=['GET'])
-        def get_users():
-            '''Retrieve list of users with pagination'''
-            page = request.args.get('page', 1, type=int)
-            per_page = request.args.get('per_page', 10, type=int)
-            users = User.query.paginate(page=page, per_page=per_page)
-            return jsonify([user.to_dict() for user in users.items])
-        """
-        
-        try:
-            # Generate documentation
-            final_state = await doc_graph.generate(sample_code)
-            
-            # Print results
-            print("Generated Documentation:")
-            for doc_type in doc_types:
-                task = final_state.tasks[doc_type]
-                print(f"\n{doc_type.value.upper()}:")
-                print(f"Status: {task.status}")
-                print(f"Content:\n{task.content}")
-                if task.metadata:
-                    print(f"Metadata: {task.metadata}")
-                    
-        except Exception as e:
-            print(f"Error generating documentation: {e}")
-
-    asyncio.run(main())
+    app = FastAPI()
+    
+    class Item(BaseModel):
+        name: str
+        price: float
+    
+    @app.post("/items/")
+    async def create_item(item: Item):
+        return {"id": 1, **item.dict()}
+    
+    @app.get("/items/{item_id}")
+    async def get_item(item_id: int):
+        if item_id < 0:
+            raise HTTPException(status_code=400, detail="Invalid ID")
+        return {"id": item_id, "name": "Sample", "price": 99.9}
+    """
+    
+    generator = DocumentationGenerator()
+    documentation = generator.generate(sample_api_code)
+    print(documentation.to_markdown())
