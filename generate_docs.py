@@ -292,7 +292,10 @@ class DocumentationGenerator:
                     "title": "API Title",
                     "base_url": "https://api.example.com",
                     "version": "v1",
-                    "description": "API description"
+                    "description": "API description",
+                    "authentication": "authentication description",
+                    "error_codes": "error codes description",
+                    "rate_limits": "rate limits description"
                 }"""),
                 HumanMessage(content=response.content)
             ]
@@ -306,11 +309,14 @@ class DocumentationGenerator:
             state["documentation"].api_docs.title = api_info_dict.get("title", "")
             state["documentation"].api_docs.base_url = api_info_dict.get("base_url", "")
             state["documentation"].api_docs.version = api_info_dict.get("version", "")
-            state["documentation"].api_docs.description = api_info_dict.get("descrgitiption", "")
+            state["documentation"].api_docs.description = api_info_dict.get("description", "")
+            state["documentation"].api_docs.authentication = api_info_dict.get("authentication", "")
+            state["documentation"].api_docs.error_codes = api_info_dict.get("error_codes", "")
+            state["documentation"].api_docs.rate_limits = api_info_dict.get("rate_limits", "")
             
             # Parse and update endpoints
-            endpoints_prompt = ChatPromptTemplate.from_messages([
-                ("system", """Extract API endpoints information in the following format for each endpoint:
+            endpoints_messages = [
+                SystemMessage(content="""Extract API endpoints information in the following format for each endpoint:
                 {
                     "path": "/endpoint",
                     "method": "GET/POST/etc",
@@ -321,22 +327,37 @@ class DocumentationGenerator:
                     "example_request": "curl example",
                     "example_response": "json response"
                 }"""),
-                ("human", response.content)
-            ])
-            endpoints_response = self.llm.invoke(endpoints_prompt)
+                HumanMessage(content=response.content)
+            ]
+            try:
+                endpoints_response = self.llm.invoke(endpoints_messages)
+            except Exception as e:
+                print("endpoints_response_2",flush=True)
+                print(e,flush=True)
             print("endpoints_response",flush=True)
             print(endpoints_response.content,flush=True)
             # Update endpoints in the documentation
             try:
-                endpoints_list = eval(endpoints_response.content)
+                # Replace JavaScript boolean values with Python ones
+                formatted_content = endpoints_response.content.replace('true', 'True').replace('false', 'False')
+                endpoints_list = eval(formatted_content)
             except Exception as e:
-                print("endpoints_list_2",flush=True)
+                print("endpoints_list_2", flush=True)
                 print(e)
             print("endpoints_list",flush=True)
-            print(e,flush=True)
+            print(endpoints_list,flush=True)
+            print("HII")
+            print(type(endpoints_list),flush=True)
+            print("WOIJODIWO")
+            print([
+                APIEndpoint(**endpoint) for endpoint in endpoints_list
+            ],flush=True)
             state["documentation"].api_docs.endpoints = [
                 APIEndpoint(**endpoint) for endpoint in endpoints_list
             ]
+
+            print("endpoints_list_3",flush=True)
+            print(state["documentation"].api_docs.endpoints,flush=True)
             
             # Update the messages history
             state["messages"].extend([messages[-1], response])
@@ -539,6 +560,17 @@ class DocumentationGenerator:
         ]
         
         if any(not field for field in required_fields):
+            missing_fields = []
+            field_names = [
+                "title", "base URL", "version", "description", 
+                "authentication", "endpoints", "error codes"
+            ]
+            
+            for field, name in zip(required_fields, field_names):
+                if not field:
+                    missing_fields.append(name)
+                    
+            print(f"Missing required fields: {', '.join(missing_fields)}", flush=True)
             raise ValueError("API documentation is incomplete. Missing required fields.")
     def _should_continue(self, state: AgentState) -> str:
         """
