@@ -1,5 +1,3 @@
-https://www.tryeuler.com/
-
 # AI Code Docs
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -8,6 +6,9 @@ https://www.tryeuler.com/
 AI Code Docs is an intelligent code documentation assistant designed to streamline and enhance the process of creating, maintaining, and exploring code documentation. By leveraging state-of-the-art AI models, this tool can generate precise, human-readable documentation for your codebase, making it easier for developers to onboard, collaborate, and maintain high-quality projects.
 
 ---
+
+https://www.tryeuler.com/
+
 
 ## Features
 
