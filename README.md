@@ -1,3 +1,5 @@
+https://www.tryeuler.com/
+
 # AI Code Docs
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
