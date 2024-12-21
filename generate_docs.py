@@ -736,3 +736,7 @@ if __name__ == "__main__":
     generator = DocumentationGenerator()
     documentation = generator.generate(sample_api_code)
     print(documentation.to_markdown())
+
+    # Write documentation to markdown file
+    with open('api_documentation.md', 'w') as f:
+        f.write(documentation.to_markdown())
