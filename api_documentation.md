@@ -1,6 +1,6 @@
-# Items API API Reference
+# API Documentation API Reference
 
-API for creating and retrieving items
+This API is used to create a new item or to retrieve the details of an existing item using its ID.
 
 ## Base URL
 `http://localhost:8000`
@@ -12,117 +12,87 @@ curl -X GET "http://localhost:8000/endpoint" \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
-1. Authentication Methods Supported:
-   - As per the provided code, there are no authentication methods implemented. If you wish to add authentication, FastAPI supports multiple ways such as OAuth2 with Password (and hashing), Bearer with JWT tokens, HTTP Basic Auth, etc.
+Given the provided FastAPI code, the API does not include any authentication methods. Therefore, the following documentation assumes that an authentication method will be added, such as token-based authentication.
 
-2. How to Obtain API keys/tokens:
-   - As there's no authentication implemented in the current API, there's no process to obtain API keys or tokens. If authentication is implemented in the future, the process for obtaining keys or tokens will depend on the type of authentication used.
+1. Authentication Methods Supported:
+   - Token-based authentication: This API supports token-based authentication. 
+
+2. How to Obtain API Keys/Tokens:
+   - To obtain an API token, you would typically need to register or sign up with the service, log in, and request for a token. The details of this process would depend on the service provider. 
 
 3. How to Include Authentication in Requests:
-   - Without any authentication implemented, there's no need to include any authentication in the requests. For future reference, if any authentication is added, it usually involves adding headers like 'Authorization' with the value of the token or key in the request.
+   - Once you have your token, you can include it in the headers of your HTTP requests. An `Authorization` key is typically used with the value set to `Bearer <Your-API-Token>`.
 
 4. Security Best Practices:
-   - Implement authentication to secure your API.
-   - Use HTTPS for secure transmission of data.
-   - Validate and sanitize inputs to prevent injections or malicious attacks.
-   - Implement rate limiting to prevent abuse.
-   - Use secure tokens and ensure they are stored securely on the client side.
-   - Encrypt sensitive data.
+   - Never share your API tokens with anyone.
+   - Do not hard-code your tokens in your application code.
+   - Use secure connections (HTTPS) to prevent tokens from being intercepted during transmission.
+   - Regularly rotate and change your tokens.
 
 5. Example Requests with Authentication:
+   - Here is how you can include the token in a POST request to the "/items/" endpoint:
 
-Since there's no authentication in place currently, here's an example request without any authentication:
+```python
+import requests
+import json
 
-POST /items/
-Request Body: 
-{
-"name": "Test item",
-"price": 123.45
-}
+url = "https://api.example.com/items/"
+headers = {"Authorization": "Bearer Your-API-Token"}
+data = json.dumps({"name": "Sample", "price": 99.9})
 
-GET /items/1
+response = requests.post(url, headers=headers, data=data)
+```
 
-Once authentication is implemented, you might include it in the headers like this:
+   - And here is an example of a GET request to the "/items/{item_id}" endpoint:
 
-POST /items/
-Headers: 
-Authorization: Bearer <token>
-Request Body:
-{
-"name": "Test item",
-"price": 123.45
-}
+```python
+import requests
 
-GET /items/1
-Headers: 
-Authorization: Bearer <token>
+url = "https://api.example.com/items/1"
+headers = {"Authorization": "Bearer Your-API-Token"}
+
+response = requests.get(url, headers=headers)
+```
+
+Please note, the above is just a general guide. The actual implementation will depend on how the authentication is designed for this API.
 
 
 ## API Endpoints
 
 ### POST /items/
 
-Create a new item
+This endpoint is used to create a new item.
 
 **Parameters**
 No parameters required.
 
 **Example Request**
 ```bash
-curl -X POST "http://localhost:8000/items/" -H "accept: application/json" -H "Content-Type: application/json" -d "{\"name\":\"Test Item\",\"price\":10.5}"
+curl -X POST "http://localhost:8000/items/" -H  "accept: application/json" -H  "Content-Type: application/json" -d "{\"name\":\"item1\",\"price\":10.5}"
 ```
 
 **Example Response**
 ```json
-{
-  "id": 1,
-  "name": "Test Item",
-  "price": 10.5
-}
+{"id": "integer", "name": "string", "price": "number"}
 ```
 
 ### GET /items/{item_id}
 
-Retrieve an item by its ID
+This endpoint is used to retrieve the details of an existing item using its ID.
 
 **Parameters**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `item_id` | integer | True | The ID of the item |
+| `item_id` | integer | True | The ID of the item to retrieve. |
 
 **Example Request**
 ```bash
-curl -X GET "http://localhost:8000/items/1" -H "accept: application/json"
+curl -X GET "http://localhost:8000/items/1" -H  "accept: application/json"
 ```
 
 **Example Response**
 ```json
-{
-  "id": 1,
-  "name": "Sample",
-  "price": 99.9
-}
-```
-
-### GET /items/{item_id}
-
-Error scenario for retrieving an item by its ID when ID is less than 0
-
-**Parameters**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `item_id` | integer | True | The ID of the item, must be greater than 0 |
-
-**Example Request**
-```bash
-curl -X GET "http://localhost:8000/items/-1" -H "accept: application/json"
-```
-
-**Example Response**
-```json
-{
-  "detail": "Invalid ID"
-}
+{"id": "integer", "name": "string", "price": "number"}
 ```
 
 
@@ -130,13 +100,11 @@ curl -X GET "http://localhost:8000/items/-1" -H "accept: application/json"
 
 | Code | Description |
 |------|-------------|
-| `400` | {'description': 'Bad Request. The server could not understand the request due to invalid syntax.', 'handling': 'Fix the request syntax and try again. Ensure the item_id is a positive integer.'} |
-| `404` | {'description': 'Not Found. The server could not find the requested resource.', 'handling': 'Ensure the endpoint and method are correct.'} |
-| `500` | {'description': 'Internal Server Error.', 'handling': 'This is a server-side error. Check the server logs for more details.'} |
-| `Invalid ID` | {'description': 'The ID provided in the request is not valid. In this case, the ID should be a positive integer.', 'handling': 'Ensure the id provided is a valid positive integer.'} |
+| `400` | {'description': "This error is raised when the `item_id` is less than 0. The error message 'Invalid ID' is displayed.", 'handling': 'Validate `item_id` at the client side and ensure it is not less than 0 before making the request.', 'example_response': {'detail': 'Invalid ID'}} |
+| `422` | {'description': 'This error is raised when the request is well-formed, however due to semantic errors it is unable to be processed. This usually happens when the client provides data in the wrong format or that does not conform to the defined model.', 'handling': 'Ensure that the data being sent in the request body is in the correct format and adheres to the defined `Item` model.', 'example_response': {'detail': [{'loc': ['body', 'price'], 'msg': 'field required', 'type': 'value_error.missing'}]}} |
 
 ## Rate Limits
-No rate limits implemented
+No rate limits specified
 
 ---
-Generated on: 2024-12-21 02:43:30
+Generated on: 2024-12-21 02:52:09
